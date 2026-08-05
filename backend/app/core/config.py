@@ -11,14 +11,17 @@ class Settings(BaseSettings):
     app_environment: str = "development"
 
     supabase_url: str = Field(alias="SUPABASE_URL")
+
     supabase_secret_key: str | None = Field(
         default=None,
         alias="SUPABASE_SECRET_KEY",
     )
+
     supabase_service_role_key: str | None = Field(
         default=None,
         alias="SUPABASE_SERVICE_ROLE_KEY",
     )
+
     supabase_storage_bucket: str = Field(
         default="lease-documents",
         alias="SUPABASE_STORAGE_BUCKET",
@@ -28,9 +31,17 @@ class Settings(BaseSettings):
         default="http://localhost:3000",
         alias="FRONTEND_URL",
     )
+
     openai_api_key: str | None = Field(
         default=None,
         alias="OPENAI_API_KEY",
+    )
+
+    dev_user_id: str = Field(alias="DEV_USER_ID")
+
+    max_upload_size_bytes: int = Field(
+        default=33_554_432,
+        alias="MAX_UPLOAD_SIZE_BYTES",
     )
 
     model_config = SettingsConfigDict(
