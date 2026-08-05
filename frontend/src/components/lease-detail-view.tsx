@@ -6,6 +6,7 @@ import {
   FileText,
   LoaderCircle,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -26,6 +27,12 @@ export function LeaseDetailView({
     useState<LeaseDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  const [extracting, setExtracting] = useState(false);
+  const [extractionMessage, setExtractionMessage] =
+    useState("");
+  const [extractionError, setExtractionError] =
+    useState("");
 
   const apiUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -78,6 +85,54 @@ export function LeaseDetailView({
   useEffect(() => {
     void loadLease();
   }, [loadLease]);
+
+  async function runGeminiExtraction() {
+    setExtracting(true);
+    setExtractionMessage("");
+    setExtractionError("");
+
+    try {
+      const response = await fetch(
+        `${apiUrl}/api/leases/${leaseId}/extract`,
+        {
+          method: "POST",
+        },
+      );
+
+      if (!response.ok) {
+        let message = `Extraction failed with status ${response.status}.`;
+
+        try {
+          const errorResponse =
+            (await response.json()) as ApiErrorResponse;
+
+          if (errorResponse.detail) {
+            message = errorResponse.detail;
+          }
+        } catch {
+          // Use the generic status message.
+        }
+
+        throw new Error(message);
+      }
+
+      await response.json();
+
+      setExtractionMessage(
+        "Structured lease data extracted successfully with Gemini.",
+      );
+
+      await loadLease();
+    } catch (requestError) {
+      setExtractionError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to extract structured lease data.",
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -147,24 +202,67 @@ export function LeaseDetailView({
           </p>
         </div>
 
-        <span className="w-fit rounded-full bg-blue-100 px-3 py-1 text-sm font-medium capitalize text-blue-800 dark:bg-blue-950 dark:text-blue-300">
-          {lease.status}
-        </span>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="w-fit rounded-full bg-blue-100 px-3 py-1 text-sm font-medium capitalize text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+            {lease.status}
+          </span>
+
+          <button
+            type="button"
+            onClick={() => void runGeminiExtraction()}
+            disabled={extracting}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {extracting ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="h-4 w-4" />
+            )}
+
+            {extracting
+              ? "Extracting..."
+              : "Extract with Gemini"}
+          </button>
+        </div>
       </div>
+
+      {extractionMessage ? (
+        <div
+          role="status"
+          className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-300"
+        >
+          {extractionMessage}
+        </div>
+      ) : null}
+
+      {extractionError ? (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{extractionError}</span>
+        </div>
+      ) : null}
 
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetadataCard
           label="Internal lease ID"
           value={lease.internal_lease_id ?? "Not provided"}
         />
+
         <MetadataCard
           label="Unit"
           value={lease.unit_number ?? "Not provided"}
         />
+
         <MetadataCard
           label="Pages"
-          value={String(lease.document.page_count ?? "Unknown")}
+          value={String(
+            lease.document.page_count ?? "Unknown",
+          )}
         />
+
         <MetadataCard
           label="File size"
           value={formatFileSize(
