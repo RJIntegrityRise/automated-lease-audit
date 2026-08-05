@@ -7,6 +7,8 @@ from supabase import Client
 from app.core.config import Settings
 from app.services.document_service import PdfExtractionResult
 
+from app.schemas.extraction import LeaseExtraction
+
 
 class LeaseUploadError(RuntimeError):
     """Raised when a lease cannot be persisted successfully."""
@@ -267,3 +269,118 @@ def get_lease_with_document(
     }
 
     return lease
+
+
+def get_latest_document_text(
+    client: Client,
+    lease_id: str,
+) -> str:
+    """Return text from the newest uploaded lease document."""
+
+    response = (
+        client.table("lease_documents")
+        .select("extracted_text")
+        .eq("lease_id", lease_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        raise LookupError("Lease document not found.")
+
+    extracted_text = response.data[0].get("extracted_text")
+
+    if not extracted_text or not extracted_text.strip():
+        raise ValueError(
+            "The lease document contains no readable extracted text."
+        )
+
+    return extracted_text
+
+
+def update_lease_status(
+    client: Client,
+    lease_id: str,
+    lease_status: str,
+    processing_error: str | None = None,
+) -> None:
+    """Update the processing status for a lease."""
+
+    (
+        client.table("leases")
+        .update(
+            {
+                "status": lease_status,
+                "processing_error": processing_error,
+            }
+        )
+        .eq("id", lease_id)
+        .execute()
+    )
+
+
+def save_lease_extraction(
+    client: Client,
+    lease_id: str,
+    extraction: LeaseExtraction,
+) -> None:
+    """Store structured Gemini extraction results."""
+
+    lease_update = {
+        "tenant_names": extraction.tenant_names,
+        "unit_number": extraction.unit_number,
+        "monthly_rent": extraction.monthly_rent,
+        "security_deposit": extraction.security_deposit,
+        "lease_start_date": (
+            extraction.lease_start_date.isoformat()
+            if extraction.lease_start_date
+            else None
+        ),
+        "lease_end_date": (
+            extraction.lease_end_date.isoformat()
+            if extraction.lease_end_date
+            else None
+        ),
+        "extraction_confidence": extraction.overall_confidence,
+        "status": "completed",
+        "processing_error": None,
+    }
+
+    lease_response = (
+        client.table("leases")
+        .update(lease_update)
+        .eq("id", lease_id)
+        .execute()
+    )
+
+    if not lease_response.data:
+        raise RuntimeError(
+            "Supabase did not update the lease extraction."
+        )
+
+    (
+        client.table("extracted_fields")
+        .delete()
+        .eq("lease_id", lease_id)
+        .execute()
+    )
+
+    evidence_rows = [
+        {
+            "lease_id": lease_id,
+            "field_name": item.field_name,
+            "field_value": item.value,
+            "page_number": item.page_number,
+            "source_text": item.source_text,
+            "confidence": item.confidence,
+        }
+        for item in extraction.evidence
+    ]
+
+    if evidence_rows:
+        (
+            client.table("extracted_fields")
+            .insert(evidence_rows)
+            .execute()
+        )

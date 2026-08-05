@@ -32,9 +32,18 @@ class Settings(BaseSettings):
         alias="FRONTEND_URL",
     )
 
-    openai_api_key: str | None = Field(
-        default=None,
-        alias="OPENAI_API_KEY",
+    gemini_api_key: str = Field(
+        alias="GEMINI_API_KEY",
+    )
+
+    gemini_model: str = Field(
+        default="gemini-3.6-flash",
+        alias="GEMINI_MODEL",
+    )
+
+    gemini_max_output_tokens: int = Field(
+        default=8192,
+        alias="GEMINI_MAX_OUTPUT_TOKENS",
     )
 
     dev_user_id: str = Field(alias="DEV_USER_ID")
@@ -50,6 +59,8 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+
 
     @property
     def supabase_backend_key(self) -> str:
