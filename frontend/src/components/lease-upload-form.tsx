@@ -14,6 +14,8 @@ import type {
   LeaseUploadResponse,
 } from "@/lib/types";
 
+import Link from "next/link";
+
 const MAX_FILE_SIZE_BYTES = 32 * 1024 * 1024;
 
 type UploadState = "idle" | "uploading" | "success" | "error";
@@ -321,6 +323,13 @@ export function LeaseUploadForm() {
                 value={result.document_id}
               />
             </dl>
+            <Link
+                href={`/leases/${result.lease_id}`}
+                className="mt-5 inline-flex items-center justify-center rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-700 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+            >
+                View lease document
+            </Link>
+            
           </div>
         )}
 

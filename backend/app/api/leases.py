@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -11,7 +12,10 @@ from fastapi import (
 
 from app.core.config import get_settings
 from app.core.supabase import get_supabase_client
-from app.schemas.lease import LeaseUploadResponse
+from app.schemas.lease import (
+    LeaseDetailResponse,
+    LeaseUploadResponse,
+)
 from app.services.document_service import (
     InvalidPdfError,
     extract_pdf_text,
@@ -20,10 +24,12 @@ from app.services.lease_service import (
     create_document_record,
     create_lease_record,
     delete_storage_object,
+    get_lease_with_document,
     mark_lease_failed,
     upload_lease_pdf,
     validate_optional_uuid,
 )
+
 
 router = APIRouter(
     prefix="/api/leases",
@@ -158,4 +164,41 @@ async def upload_lease(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Lease upload failed: {exc}",
+        ) from exc
+
+
+@router.get(
+    "/{lease_id}",
+    response_model=LeaseDetailResponse,
+)
+def get_lease(
+    lease_id: UUID,
+) -> LeaseDetailResponse:
+    """Return lease metadata, extracted text and a signed PDF URL."""
+
+    settings = get_settings()
+    client = get_supabase_client()
+
+    try:
+        lease = get_lease_with_document(
+            client=client,
+            settings=settings,
+            lease_id=str(lease_id),
+        )
+
+        return LeaseDetailResponse.model_validate(lease)
+
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Unable to retrieve lease: "
+                f"{type(exc).__name__}: {exc}"
+            ),
         ) from exc

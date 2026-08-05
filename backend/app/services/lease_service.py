@@ -174,3 +174,96 @@ def validate_optional_uuid(
         raise ValueError(
             f"{field_name} must be a valid UUID."
         ) from exc
+
+def get_lease_with_document(
+    client: Client,
+    settings: Settings,
+    lease_id: str,
+) -> dict[str, Any]:
+    """Retrieve a lease and its most recent document."""
+
+    lease_response = (
+        client.table("leases")
+        .select(
+            (
+                "id,"
+                "internal_lease_id,"
+                "unit_number,"
+                "status,"
+                "tenant_names,"
+                "monthly_rent,"
+                "security_deposit,"
+                "lease_start_date,"
+                "lease_end_date,"
+                "extraction_confidence,"
+                "processing_error,"
+                "created_at"
+            )
+        )
+        .eq("id", lease_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not lease_response.data:
+        raise LookupError("Lease not found.")
+
+    document_response = (
+        client.table("lease_documents")
+        .select(
+            (
+                "id,"
+                "storage_path,"
+                "original_filename,"
+                "mime_type,"
+                "file_size_bytes,"
+                "page_count,"
+                "extracted_text,"
+                "created_at"
+            )
+        )
+        .eq("lease_id", lease_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not document_response.data:
+        raise LookupError("Lease document not found.")
+
+    lease = lease_response.data[0]
+    document = document_response.data[0]
+
+    expires_in = 3600
+
+    signed_url_response = (
+        client.storage
+        .from_(settings.supabase_storage_bucket)
+        .create_signed_url(
+            document["storage_path"],
+            expires_in,
+        )
+    )
+
+    signed_url = signed_url_response.get("signedURL")
+
+    if not signed_url:
+        signed_url = signed_url_response.get("signed_url")
+
+    if not signed_url:
+        raise LeaseUploadError(
+            "Supabase did not return a signed document URL."
+        )
+
+    lease["document"] = {
+        "id": document["id"],
+        "original_filename": document["original_filename"],
+        "mime_type": document["mime_type"],
+        "file_size_bytes": document["file_size_bytes"],
+        "page_count": document["page_count"],
+        "extracted_text": document["extracted_text"],
+        "signed_url": signed_url,
+        "signed_url_expires_in": expires_in,
+    }
+
+    return lease
