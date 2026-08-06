@@ -39,3 +39,36 @@ export type LeaseDetailResponse = {
   created_at: string;
   document: LeaseDocumentDetail;
 };
+
+export type AuditFinding = {
+  id: string | null;
+  rule_id: string | null;
+  rule_code: string;
+  category: string;
+  status: string;
+  severity: string;
+  title: string;
+  explanation: string;
+  field_name: string | null;
+  actual_value: unknown;
+  expected_value: unknown;
+  page_numbers: number[];
+  evidence: Record<string, unknown>;
+  requires_review: boolean;
+};
+
+export type AuditSummary = {
+  id: string;
+  lease_id: string;
+  status: string;
+  score: number;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  low_count: number;
+  informational_count: number;
+  total_findings: number;
+  recommendation: string;
+  completed_at: string | null;
+  findings: AuditFinding[];
+};
