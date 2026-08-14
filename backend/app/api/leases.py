@@ -12,26 +12,40 @@ from fastapi import (
 
 from app.core.config import get_settings
 from app.core.supabase import get_supabase_client
-from app.schemas.extraction import LeaseExtractionResponse
+from app.schemas.extraction import ExtractionRunListItem, LeaseExtractionResponse
 from app.schemas.lease import (
     LeaseDetailResponse,
     LeaseUploadResponse,
 )
 from app.services.document_service import (
     InvalidPdfError,
-    extract_pdf_text,
+    PdfExtractionResult,
+    extract_page_words,
+    inspect_pdf_fields,
 )
+
+from app.services.ocr_service import (
+    OcrError,
+    process_pdf_with_ocr,
+)
+
+
 from app.services.lease_service import (
     create_document_record,
+    create_extraction_run,
     create_lease_record,
     delete_storage_object,
-    get_latest_document_text,
+    get_latest_document,
     get_lease_with_document,
+    mark_extraction_run_failed,
     mark_lease_failed,
     save_lease_extraction,
-    update_lease_status,
     upload_lease_pdf,
     validate_optional_uuid,
+)
+
+from app.services.deterministic_scan_service import (
+    run_deterministic_extraction,
 )
 
 
@@ -39,6 +53,14 @@ from app.services.gemini_service import (
     GeminiExtractionError,
     extract_lease_with_gemini,
 )
+
+from app.schemas.checklist import (
+    LeaseChecklistResult,
+)
+from app.services.checklist_service import (
+    evaluate_checklist,
+)
+
 
 
 router = APIRouter(
@@ -92,6 +114,23 @@ async def upload_lease(
         )
 
     try:
+        document_metadata = inspect_pdf_fields(
+            pdf_bytes=file_bytes,
+        )
+        page_layout = extract_page_words(
+            pdf_bytes=file_bytes,
+        )
+
+        document_metadata["page_layout"] = (
+            page_layout
+        )
+    except InvalidPdfError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    try:
         validated_property_id = validate_optional_uuid(
             property_id,
             "property_id",
@@ -102,13 +141,38 @@ async def upload_lease(
             detail=str(exc),
         ) from exc
 
+
+
     try:
-        extraction = extract_pdf_text(file_bytes)
-    except InvalidPdfError as exc:
+        ocr_result = process_pdf_with_ocr(
+            pdf_bytes=file_bytes,
+        )
+    
+
+        page_texts = [
+            f"--- Page {page.page_number} ---\n"
+            f"{page.combined_text}"
+            for page in ocr_result.pages
+        ]
+
+        full_text = "\n\n".join(page_texts)
+
+        extraction = PdfExtractionResult(
+            page_count=len(ocr_result.pages),
+            full_text=full_text,
+            page_texts=page_texts,
+        )
+
+    except (InvalidPdfError, OcrError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+
+
+    
 
     lease_id: str | None = None
     storage_path: str | None = None
@@ -141,6 +205,12 @@ async def upload_lease(
             original_filename=filename,
             file_size_bytes=len(file_bytes),
             extraction=extraction,
+            document_metadata=document_metadata,
+            ocr_metadata=ocr_result.model_dump(
+                mode="json"
+            ),
+            ocr_used=ocr_result.ocr_page_count > 0,
+            ocr_page_count=ocr_result.ocr_page_count,
         )
 
         return LeaseUploadResponse(
@@ -221,36 +291,45 @@ def get_lease(
 def extract_lease_data(
     lease_id: UUID,
 ) -> LeaseExtractionResponse:
-    """Extract and store structured lease information with Gemini."""
+    """Create an independent Gemini extraction run."""
 
     settings = get_settings()
     client = get_supabase_client()
     lease_id_string = str(lease_id)
 
+    extraction_run_id: str | None = None
+
     try:
-        update_lease_status(
+        document = get_latest_document(
             client=client,
             lease_id=lease_id_string,
-            lease_status="extracting",
         )
 
-        extracted_text = get_latest_document_text(
+        extraction_run = create_extraction_run(
             client=client,
             lease_id=lease_id_string,
+            document_id=document["id"],
+            provider="gemini",
+            model_name=settings.gemini_model,
         )
+
+        extraction_run_id = extraction_run["id"]
 
         extraction = extract_lease_with_gemini(
-            extracted_text=extracted_text,
+            extracted_text=document["extracted_text"],
         )
 
         save_lease_extraction(
             client=client,
             lease_id=lease_id_string,
+            extraction_run_id=extraction_run_id,
             extraction=extraction,
         )
 
         return LeaseExtractionResponse(
+            extraction_run_id=extraction_run_id,
             lease_id=lease_id_string,
+            document_id=document["id"],
             status="completed",
             model=settings.gemini_model,
             extracted_data=extraction,
@@ -264,12 +343,12 @@ def extract_lease_data(
         ) from exc
 
     except (GeminiExtractionError, ValueError) as exc:
-        update_lease_status(
-            client=client,
-            lease_id=lease_id_string,
-            lease_status="failed",
-            processing_error=str(exc)[:2000],
-        )
+        if extraction_run_id:
+            mark_extraction_run_failed(
+                client=client,
+                extraction_run_id=extraction_run_id,
+                error_message=str(exc),
+            )
 
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -277,12 +356,12 @@ def extract_lease_data(
         ) from exc
 
     except Exception as exc:
-        update_lease_status(
-            client=client,
-            lease_id=lease_id_string,
-            lease_status="failed",
-            processing_error=str(exc)[:2000],
-        )
+        if extraction_run_id:
+            mark_extraction_run_failed(
+                client=client,
+                extraction_run_id=extraction_run_id,
+                error_message=str(exc),
+            )
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -293,3 +372,144 @@ def extract_lease_data(
         ) from exc
 
 
+
+@router.get(
+    "/{lease_id}/extractions",
+    response_model=list[ExtractionRunListItem],
+)
+def list_extraction_runs(
+    lease_id: UUID,
+) -> list[ExtractionRunListItem]:
+    client = get_supabase_client()
+
+    response = (
+        client.table("extraction_runs")
+        .select(
+            (
+                "id,"
+                "lease_id,"
+                "document_id,"
+                "status,"
+                "provider,"
+                "model_name,"
+                "overall_confidence,"
+                "processing_error,"
+                "created_at,"
+                "completed_at"
+            )
+        )
+        .eq("lease_id", str(lease_id))
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    return [
+        ExtractionRunListItem.model_validate(item)
+        for item in response.data or []
+    ]
+
+@router.post(
+    "/{lease_id}/scan",
+)
+def scan_lease_without_ai(
+    lease_id: UUID,
+) -> dict:
+    """Run an independent deterministic lease scan."""
+
+    client = get_supabase_client()
+
+    try:
+        result = run_deterministic_extraction(
+            client=client,
+            lease_id=str(lease_id),
+        )
+
+        return {
+            "extraction_run_id": result["id"],
+            "lease_id": result["lease_id"],
+            "document_id": result["document_id"],
+            "status": result["status"],
+            "extraction_method": result[
+                "extraction_method"
+            ],
+            "scanner_version": result[
+                "scanner_version"
+            ],
+            "structured_data": result[
+                "structured_data"
+            ],
+        }
+
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Deterministic scan failed: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+
+
+@router.get(
+    "/{lease_id}/checklist",
+    response_model=LeaseChecklistResult,
+)
+def get_lease_checklist(
+    lease_id: UUID,
+    extraction_run_id: UUID,
+) -> LeaseChecklistResult:
+    """
+    Evaluate the configured lease checklist against
+    one specific independent scan.
+    """
+
+    client = get_supabase_client()
+
+    try:
+        run_response = (
+            client.table("extraction_runs")
+            .select("id,lease_id")
+            .eq("id", str(extraction_run_id))
+            .eq("lease_id", str(lease_id))
+            .limit(1)
+            .execute()
+        )
+
+        if not run_response.data:
+            raise LookupError(
+                "Extraction run not found for this lease."
+            )
+
+        return evaluate_checklist(
+            client=client,
+            extraction_run_id=str(
+                extraction_run_id
+            ),
+        )
+
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Checklist evaluation failed: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        ) from exc

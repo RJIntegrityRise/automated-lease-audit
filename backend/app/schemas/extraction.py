@@ -3,7 +3,25 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 
+from datetime import datetime
+
+
+
+
 EvidenceValue = str | int | float | bool | list[str] | None
+
+
+class ExtractionRunListItem(BaseModel):
+    id: str
+    lease_id: str
+    document_id: str
+    status: str
+    provider: str
+    model_name: str
+    overall_confidence: float | None
+    processing_error: str | None
+    created_at: datetime
+    completed_at: datetime | None
 
 
 class FieldEvidence(BaseModel):
@@ -72,7 +90,9 @@ class LeaseExtraction(BaseModel):
 class LeaseExtractionResponse(BaseModel):
     """Response returned after structured Gemini extraction."""
 
+    extraction_run_id: str
     lease_id: str
+    document_id: str
     status: str
     model: str
     extracted_data: LeaseExtraction

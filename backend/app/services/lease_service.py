@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.services.document_service import PdfExtractionResult
 
 from app.schemas.extraction import LeaseExtraction
+from datetime import datetime, timezone
 
 
 class LeaseUploadError(RuntimeError):
@@ -97,6 +98,10 @@ def create_document_record(
     original_filename: str,
     file_size_bytes: int,
     extraction: PdfExtractionResult,
+    document_metadata: dict[str, Any],
+    ocr_metadata: dict[str, Any],
+    ocr_used: bool,
+    ocr_page_count: int,
 ) -> dict[str, Any]:
     """Create the document record after upload and extraction."""
 
@@ -111,6 +116,10 @@ def create_document_record(
                 "file_size_bytes": file_size_bytes,
                 "page_count": extraction.page_count,
                 "extracted_text": extraction.full_text,
+                "document_metadata": document_metadata,
+                "ocr_metadata": ocr_metadata,
+                "ocr_used": ocr_used,
+                "ocr_page_count": ocr_page_count,
                 "uploaded_by": user_id,
             }
         )
@@ -271,15 +280,17 @@ def get_lease_with_document(
     return lease
 
 
-def get_latest_document_text(
+def get_latest_document(
     client: Client,
     lease_id: str,
-) -> str:
-    """Return text from the newest uploaded lease document."""
+) -> dict[str, Any]:
+    """Return the newest document for a lease."""
 
     response = (
         client.table("lease_documents")
-        .select("extracted_text")
+        .select(
+            "id,lease_id,extracted_text,original_filename,created_at"
+        )
         .eq("lease_id", lease_id)
         .order("created_at", desc=True)
         .limit(1)
@@ -289,14 +300,49 @@ def get_latest_document_text(
     if not response.data:
         raise LookupError("Lease document not found.")
 
-    extracted_text = response.data[0].get("extracted_text")
+    document = response.data[0]
+    extracted_text = document.get("extracted_text")
 
     if not extracted_text or not extracted_text.strip():
         raise ValueError(
             "The lease document contains no readable extracted text."
         )
 
-    return extracted_text
+    return document
+
+
+def create_extraction_run(
+    client: Client,
+    lease_id: str,
+    document_id: str,
+    provider: str,
+    model_name: str,
+) -> dict[str, Any]:
+    """Create a new independent extraction run."""
+
+    response = (
+        client.table("extraction_runs")
+        .insert(
+            {
+                "lease_id": lease_id,
+                "document_id": document_id,
+                "status": "processing",
+                "provider": provider,
+                "model_name": model_name,
+                "started_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            }
+        )
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not create the extraction run."
+        )
+
+    return response.data[0]
 
 
 def update_lease_status(
@@ -323,52 +369,43 @@ def update_lease_status(
 def save_lease_extraction(
     client: Client,
     lease_id: str,
+    extraction_run_id: str,
     extraction: LeaseExtraction,
 ) -> None:
-    """Store structured Gemini extraction results."""
+    """Save one independent extraction without deleting past results."""
 
-    lease_update = {
-        "tenant_names": extraction.tenant_names,
-        "unit_number": extraction.unit_number,
-        "monthly_rent": extraction.monthly_rent,
-        "security_deposit": extraction.security_deposit,
-        "lease_start_date": (
-            extraction.lease_start_date.isoformat()
-            if extraction.lease_start_date
-            else None
-        ),
-        "lease_end_date": (
-            extraction.lease_end_date.isoformat()
-            if extraction.lease_end_date
-            else None
-        ),
-        "extraction_confidence": extraction.overall_confidence,
-        "status": "completed",
-        "processing_error": None,
-    }
+    completed_at = datetime.now(
+        timezone.utc
+    ).isoformat()
 
-    lease_response = (
-        client.table("leases")
-        .update(lease_update)
-        .eq("id", lease_id)
-        .execute()
+    extraction_payload = extraction.model_dump(
+        mode="json"
     )
 
-    if not lease_response.data:
-        raise RuntimeError(
-            "Supabase did not update the lease extraction."
+    extraction_response = (
+        client.table("extraction_runs")
+        .update(
+            {
+                "status": "completed",
+                "structured_data": extraction_payload,
+                "overall_confidence": extraction.overall_confidence,
+                "processing_error": None,
+                "completed_at": completed_at,
+            }
         )
-
-    (
-        client.table("extracted_fields")
-        .delete()
-        .eq("lease_id", lease_id)
+        .eq("id", extraction_run_id)
         .execute()
     )
+
+    if not extraction_response.data:
+        raise RuntimeError(
+            "Supabase did not complete the extraction run."
+        )
 
     evidence_rows = [
         {
             "lease_id": lease_id,
+            "extraction_run_id": extraction_run_id,
             "field_name": item.field_name,
             "field_value": item.value,
             "page_number": item.page_number,
@@ -379,8 +416,71 @@ def save_lease_extraction(
     ]
 
     if evidence_rows:
-        (
+        evidence_response = (
             client.table("extracted_fields")
             .insert(evidence_rows)
             .execute()
         )
+
+        if not evidence_response.data:
+            raise RuntimeError(
+                "Supabase did not save the extracted evidence."
+            )
+
+    lease_response = (
+        client.table("leases")
+        .update(
+            {
+                "tenant_names": extraction.tenant_names,
+                "unit_number": extraction.unit_number,
+                "monthly_rent": extraction.monthly_rent,
+                "security_deposit": extraction.security_deposit,
+                "lease_start_date": (
+                    extraction.lease_start_date.isoformat()
+                    if extraction.lease_start_date
+                    else None
+                ),
+                "lease_end_date": (
+                    extraction.lease_end_date.isoformat()
+                    if extraction.lease_end_date
+                    else None
+                ),
+                "extraction_confidence": (
+                    extraction.overall_confidence
+                ),
+                "status": "completed",
+                "processing_error": None,
+            }
+        )
+        .eq("id", lease_id)
+        .execute()
+    )
+
+    if not lease_response.data:
+        raise RuntimeError(
+            "Supabase did not update the lease summary."
+        )
+
+
+
+def mark_extraction_run_failed(
+    client: Client,
+    extraction_run_id: str,
+    error_message: str,
+) -> None:
+    """Mark one extraction run as failed."""
+
+    (
+        client.table("extraction_runs")
+        .update(
+            {
+                "status": "failed",
+                "processing_error": error_message[:2000],
+                "completed_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            }
+        )
+        .eq("id", extraction_run_id)
+        .execute()
+    )

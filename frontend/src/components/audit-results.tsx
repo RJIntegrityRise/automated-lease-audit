@@ -86,16 +86,14 @@ type FindingCardProps = {
 function FindingCard({
   finding,
 }: FindingCardProps) {
-  const Icon = getSeverityIcon(finding.severity);
+  
 
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-start gap-4">
-        <Icon
-          className={`mt-0.5 h-6 w-6 shrink-0 ${getSeverityClass(
-            finding.severity,
-          )}`}
-        />
+        <div className="mt-0.5 shrink-0">
+            {getSeverityIcon(finding.severity)}
+        </div>
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -129,15 +127,20 @@ function FindingCard({
 }
 
 function getSeverityIcon(severity: string) {
+  const className = `h-6 w-6 ${getSeverityClass(severity)}`;
+
   switch (severity) {
     case "critical":
-      return ShieldAlert;
+      return <ShieldAlert className={className} />;
+
     case "high":
-      return AlertTriangle;
+      return <AlertTriangle className={className} />;
+
     case "medium":
-      return AlertCircle;
+      return <AlertCircle className={className} />;
+
     default:
-      return Info;
+      return <Info className={className} />;
   }
 }
 

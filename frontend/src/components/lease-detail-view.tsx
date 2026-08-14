@@ -14,11 +14,19 @@ import { useCallback, useEffect, useState } from "react";
 
 import { AuditResults } from "@/components/audit-results";
 
+import { LeaseChecklist } from "@/components/lease-checklist";
+
+import type {
+  LeaseChecklistResult,
+} from "@/lib/types";
+
 import type {
   ApiErrorResponse,
   AuditSummary,
   LeaseDetailResponse,
+  DeterministicScanResponse,
 } from "@/lib/types";
+import { SignatureChecks } from "./signature-checks";
 
 type LeaseDetailViewProps = {
   leaseId: string;
@@ -32,16 +40,49 @@ export function LeaseDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [scanning, setScanning] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractionMessage, setExtractionMessage] =
     useState("");
   const [extractionError, setExtractionError] =
     useState("");
 
-  const [auditing, setAuditing] = useState(false);
-  const [auditMessage, setAuditMessage] = useState("");
+
+  const [
+    currentExtractionRunId,
+    setCurrentExtractionRunId,
+  ] = useState<string | null>(null);
+
+  const [scanResult, setScanResult] =
+  useState<DeterministicScanResponse | null>(
+    null,
+  );
+
+   
+
+  const [checklist, setChecklist] =
+    useState<LeaseChecklistResult | null>(
+      null,
+    );
+
+  const [pdfPage, setPdfPage] =
+    useState<number | null>(null);
+
+  const [auditing, setAuditing] =
+    useState(false);
+ 
+  const [auditMessage, setAuditMessage] =
+    useState("");
+ 
   const [audit, setAudit] =
     useState<AuditSummary | null>(null);
+
+
+
+
+
+
+
 
   const apiUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -92,13 +133,118 @@ export function LeaseDetailView({
   }, [apiUrl, leaseId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadLease();
-  }, [loadLease]);
+  }, [loadLease]); 
 
-  async function runGeminiExtraction() {
+
+
+  async function runDeterministicScan() {
+    setScanning(true);
+    setExtractionMessage("");
+    setExtractionError("");
+
+    setChecklist(null);
+    setScanResult(null);
+    setAudit(null);
+    setAuditMessage("");
+    setCurrentExtractionRunId(null);
+
+    try {
+      const response = await fetch(
+        `${apiUrl}/api/leases/${leaseId}/scan`,
+        {
+          method: "POST",
+        },
+      );
+
+
+      const responseData =
+        (await response.json()) as
+          | DeterministicScanResponse
+          | ApiErrorResponse;
+
+      if (!response.ok) {
+        throw new Error(
+          "detail" in responseData &&
+            responseData.detail
+            ? responseData.detail
+            : "Deterministic lease scan failed.",
+        );
+      }
+
+      
+
+      const scanData =
+            responseData as DeterministicScanResponse;
+
+      const runId = scanData.extraction_run_id;
+
+      setCurrentExtractionRunId(runId);
+      setScanResult(scanData);
+
+      const checklistResponse = await fetch(
+        `${apiUrl}/api/leases/${leaseId}/checklist?extraction_run_id=${encodeURIComponent(
+            runId,
+        )}`,
+        {
+            method: "GET",
+            cache: "no-store",
+        },
+      );
+
+      if (!checklistResponse.ok) {
+        let message = "Checklist evaluation failed.";
+
+        try {
+            const checklistError =
+                (await checklistResponse.json()) as ApiErrorResponse;
+
+            if (checklistError.detail) {
+                message = checklistError.detail;
+            }
+        } catch {
+            // Use the generic checklist error.
+        }
+
+        throw new Error(message);
+      }
+
+      const checklistResult =
+        (await checklistResponse.json()) as LeaseChecklistResult;
+
+      setChecklist(checklistResult);
+
+      setExtractionMessage(
+        "Basic lease conditions and checklist scanned successfully.",
+      );
+
+
+
+
+
+
+    } catch (scanError) {
+      setExtractionError(
+        scanError instanceof Error
+          ? scanError.message
+          : "Deterministic lease scan failed.",
+      );
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function runGeminiExtraction() 
+  {
+    setChecklist(null);
+    setScanResult(null);
     setExtracting(true);
     setExtractionMessage("");
     setExtractionError("");
+    setCurrentExtractionRunId(null);
+    setAudit(null);
+    setAuditMessage("");
 
     try {
       const response = await fetch(
@@ -125,7 +271,16 @@ export function LeaseDetailView({
         throw new Error(message);
       }
 
-      await response.json();
+      const extractionResult = (await response.json()) as {
+        extraction_run_id: string;
+      };
+
+      setCurrentExtractionRunId(
+        extractionResult.extraction_run_id,
+      );
+
+       // Remove an older audit from the screen because a new
+       // extraction snapshot has now been created.
 
       setExtractionMessage(
         "Structured lease data extracted successfully with Gemini.",
@@ -143,44 +298,68 @@ export function LeaseDetailView({
     }
   }
 
+  
   async function runLeaseAudit() {
-    setAuditing(true);
-    setAuditMessage("");
+  if (!currentExtractionRunId) {
+    setAuditMessage(
+      "Run Gemini extraction before starting an audit.",
+    );
+    return;
+  }
 
-    try {
-      const response = await fetch(
-        `${apiUrl}/api/leases/${leaseId}/audit`,
-        {
-          method: "POST",
-        },
-      );
+  setAuditing(true);
+  setAuditMessage("");
 
-      if (!response.ok) {
+  try {
+    const response = await fetch(
+      `${apiUrl}/api/leases/${leaseId}/audit?extraction_run_id=${encodeURIComponent(
+        currentExtractionRunId,
+      )}`,
+      {
+        method: "POST",
+      },
+    );
+
+    if (!response.ok) {
+      let message = `Audit failed with status ${response.status}.`;
+
+      try {
         const errorData =
           (await response.json()) as ApiErrorResponse;
 
-        throw new Error(
-          errorData.detail ?? "Lease audit failed.",
-        );
+        if (errorData.detail) {
+          message = errorData.detail;
+        }
+      } catch {
+        // Use the generic status message.
       }
 
-      const result =
+      throw new Error(message);
+    }
+
+    const result =
         (await response.json()) as AuditSummary;
 
-      setAudit(result);
-      setAuditMessage(
-        "Deterministic lease audit completed.",
-      );
+        setAudit(result);
+        setAuditMessage(
+            "Deterministic lease audit completed.",
+        );
     } catch (auditError) {
-      setAuditMessage(
-        auditError instanceof Error
-          ? auditError.message
-          : "Lease audit failed.",
-      );
+        setAuditMessage(
+            auditError instanceof Error
+                ? auditError.message
+                : "Lease audit failed.",
+        );
     } finally {
-      setAuditing(false);
+        setAuditing(false);
+
     }
+
+
   }
+
+
+
 
   if (loading) {
     return (
@@ -257,8 +436,27 @@ export function LeaseDetailView({
 
           <button
             type="button"
+            onClick={() => void runDeterministicScan()}
+            disabled={scanning ||extracting || auditing}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {scanning ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+                <ShieldAlert className="h-4 w-4" />
+            )}
+
+            {scanning
+                ? "Scanning..."
+                : "Scan basic lease conditions"}
+          </button>
+
+
+
+          <button
+            type="button"
             onClick={() => void runGeminiExtraction()}
-            disabled={extracting}
+            disabled={extracting || scanning || auditing}
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {extracting ? (
@@ -275,7 +473,12 @@ export function LeaseDetailView({
           <button
             type="button"
             onClick={() => void runLeaseAudit()}
-            disabled={auditing || lease.status !== "completed"}
+            disabled={
+              auditing ||
+              extracting ||
+              scanning ||
+              !currentExtractionRunId
+            }
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {auditing ? (
@@ -364,13 +567,21 @@ export function LeaseDetailView({
           </div>
 
           <iframe
-            src={lease.document.signed_url}
+            key={`${lease.document.signed_url}-${pdfPage ?? 1}`}
+            src={
+              pdfPage
+                ? `${lease.document.signed_url}#page=${pdfPage}`
+                : lease.document.signed_url
+            }
             title={`PDF preview of ${lease.document.original_filename}`}
             className="h-[700px] w-full bg-slate-100 dark:bg-slate-950"
           />
         </div>
 
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div 
+          id="pdf-preview"
+          className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
+          >
           <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-800">
             <h2 className="font-semibold text-slate-950 dark:text-white">
               Extracted text
@@ -386,6 +597,66 @@ export function LeaseDetailView({
           </pre>
         </div>
       </section>
+
+      {scanResult && (
+        <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <MetadataCard
+              label="OCR used"
+              value={
+                scanResult.structured_data.ocr_used
+                  ? "Yes"
+                  : "No"
+              }
+            />
+
+            <MetadataCard
+              label="OCR pages"
+              value={String(
+                scanResult.structured_data.ocr_page_count,
+              )}
+            />
+
+            <MetadataCard
+              label="Signature image review"
+              value={
+                scanResult.structured_data
+                  .signature_image_review_required
+                  ? "Required"
+                  :"Not required"
+              }
+            />
+
+          </div>
+
+          <SignatureChecks
+            checks={
+              scanResult.structured_data
+                .tenant_signature_checks
+            }
+          />
+        </div>
+      )}
+
+      {checklist && (
+        <LeaseChecklist
+            checklist={checklist}
+            onGoToPage={(page) => {
+              setPdfPage(page);
+
+              document
+                .getElementById("pdf-preview")
+                ?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+            }}
+        />
+      )}
+
+
+ 
+
 
       {audit && <AuditResults audit={audit} />}
     </div>

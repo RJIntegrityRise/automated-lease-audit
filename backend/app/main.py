@@ -7,6 +7,8 @@ from app.api.health import router as health_router
 from app.core.config import get_settings
 
 from app.api.leases import router as leases_router
+from app.api.dashboard import router as dashboard_router
+
 
 settings = get_settings()
 
@@ -29,6 +31,7 @@ app.include_router(health_router)
 app.include_router(leases_router)
 
 app.include_router(audits_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/", tags=["Root"])

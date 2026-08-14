@@ -30,7 +30,10 @@ def evaluate_rule(
 
     if "field" in configuration:
         field_name = configuration["field"]
-        actual_value = extracted_data.get(field_name)
+        actual_value = get_nested_value(
+            extracted_data,
+            field_name,
+        )
     else:
         field_name = None
         actual_value = None
@@ -43,6 +46,18 @@ def evaluate_rule(
             "A value was found."
             if passed
             else "No value was found."
+        )
+
+    elif operator == "is_empty":
+        passed = actual_value in (None, "", [], {})
+
+        explanation = (
+            "No unexpected values were found."
+            if passed
+            else (
+                "Unexpected values were found: "
+                f"{actual_value!r}."
+            )
         )
 
     elif operator == "equals":
@@ -176,3 +191,19 @@ def get_recommendation(score: int) -> str:
         return "Significant issues"
 
     return "High-risk review required"
+
+def get_nested_value(
+    data: dict[str, Any],
+    field_path: str,
+) -> Any:
+    """Read values using paths such as tenant_signature.status."""
+
+    current: Any = data
+
+    for part in field_path.split("."):
+        if not isinstance(current, dict):
+            return None
+
+        current = current.get(part)
+
+    return current

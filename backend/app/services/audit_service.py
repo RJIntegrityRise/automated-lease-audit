@@ -14,70 +14,63 @@ from app.services.audit_engine import (
 def get_extracted_lease_data(
     client: Client,
     lease_id: str,
+    extraction_run_id: str,
 ) -> dict[str, Any]:
-    """Load fields required by the deterministic rule engine."""
+    """Load one extraction snapshot for an independent audit."""
 
-    response = (
-        client.table("leases")
+    run_response = (
+        client.table("extraction_runs")
         .select(
-            (
-                "id,"
-                "unit_number,"
-                "tenant_names,"
-                "monthly_rent,"
-                "security_deposit,"
-                "lease_start_date,"
-                "lease_end_date,"
-                "extraction_confidence,"
-                "status"
-            )
+            "id,lease_id,status,structured_data,overall_confidence"
         )
-        .eq("id", lease_id)
+        .eq("id", extraction_run_id)
+        .eq("lease_id", lease_id)
         .limit(1)
         .execute()
     )
 
-    if not response.data:
-        raise LookupError("Lease not found.")
+    if not run_response.data:
+        raise LookupError(
+            "Extraction run not found for this lease."
+        )
 
-    lease = response.data[0]
+    run = run_response.data[0]
+
+    if run["status"] != "completed":
+        raise ValueError(
+            "Only a completed extraction run can be audited."
+        )
+
+    structured_data = run.get("structured_data")
+
+    if not structured_data:
+        raise ValueError(
+            "The extraction run contains no structured data."
+        )
 
     evidence_response = (
         client.table("extracted_fields")
         .select(
             "field_name,field_value,page_number,source_text,confidence"
         )
-        .eq("lease_id", lease_id)
+        .eq("extraction_run_id", extraction_run_id)
         .execute()
     )
-
-    extracted_data: dict[str, Any] = {
-        "unit_number": lease.get("unit_number"),
-        "tenant_names": lease.get("tenant_names") or [],
-        "monthly_rent": lease.get("monthly_rent"),
-        "security_deposit": lease.get("security_deposit"),
-        "lease_start_date": lease.get("lease_start_date"),
-        "lease_end_date": lease.get("lease_end_date"),
-        "overall_confidence": lease.get(
-            "extraction_confidence"
-        ),
-    }
 
     evidence_by_field: dict[str, list[dict[str, Any]]] = {}
 
     for item in evidence_response.data or []:
-        field_name = item["field_name"]
-        extracted_data[field_name] = item["field_value"]
-
         evidence_by_field.setdefault(
-            field_name,
+            item["field_name"],
             [],
         ).append(item)
 
     return {
-        "fields": extracted_data,
+        "fields": structured_data,
         "evidence": evidence_by_field,
     }
+
+
 
 
 def get_enabled_rules(
@@ -107,12 +100,14 @@ def get_enabled_rules(
 def run_lease_audit(
     client: Client,
     lease_id: str,
+    extraction_run_id: str,
 ) -> dict[str, Any]:
-    """Run all enabled deterministic audit rules."""
+    """Run all enabled rules against one extraction snapshot."""
 
     extraction = get_extracted_lease_data(
         client=client,
         lease_id=lease_id,
+        extraction_run_id=extraction_run_id,
     )
 
     fields = extraction["fields"]
@@ -125,6 +120,7 @@ def run_lease_audit(
         .insert(
             {
                 "lease_id": lease_id,
+                "extraction_run_id": extraction_run_id,
                 "status": "processing",
                 "started_at": datetime.now(
                     timezone.utc
@@ -152,7 +148,29 @@ def run_lease_audit(
         if result.passed:
             continue
 
+        actual_status = result.actual_value
+
+
+        if actual_status == "unknown":
+            finding_status = "review"
+            explanation = (
+                "The scanner could not determine this condition. "
+                "Manual verification is required."
+    
+            )
+        elif actual_status == "not_detected":
+            finding_status = "failed"
+            explanation = (
+                "A required signature was not detected in the "
+                "document text or PDF form fields."
+                )
+    
+        else:
+            finding_status = "failed"
+            explanation = result.explanation
+
         field_name = rule["configuration"].get("field")
+
         field_evidence = (
             evidence_by_field.get(field_name, [])
             if field_name
@@ -171,10 +189,10 @@ def run_lease_audit(
             {
                 "audit_id": audit["id"],
                 "rule_id": rule["id"],
-                "status": "failed",
+                "status": "finding_status",
                 "severity": rule["severity"],
                 "title": rule["name"],
-                "explanation": result.explanation,
+                "explanation": explanation,
                 "field_name": field_name,
                 "actual_value": result.actual_value,
                 "expected_value": result.expected_value,
@@ -194,14 +212,20 @@ def run_lease_audit(
     counts = Counter(
         finding["severity"]
         for finding in findings
+        if finding["status"] == "failed"
     )
 
     if findings:
-        (
+        findings_response = (
             client.table("audit_findings")
             .insert(findings)
             .execute()
         )
+
+        if not findings_response.data:
+            raise RuntimeError(
+                "Supabase did not save the audit findings."
+            )
 
     completed_at = datetime.now(
         timezone.utc
@@ -235,6 +259,7 @@ def run_lease_audit(
         )
 
     return update_response.data[0]
+
 
 
 def get_audit_with_findings(

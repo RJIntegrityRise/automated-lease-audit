@@ -50,7 +50,22 @@ class Settings(BaseSettings):
 
     max_upload_size_bytes: int = Field(
         default=33_554_432,
-        alias="MAX_UPLOAD_SIZE_BYTES",
+        alias="MAX_UPLOAD_SIZE_BYTES", 
+    )
+
+    ocr_enabled: bool = Field(
+        default=True,
+        alias="OCR_ENABLED",
+    )
+
+    ocr_min_characters_per_page: int = Field(
+        default=80,
+        alias="OCR_MIN_CHARACTERS_PER_PAGE",
+    )
+
+    ocr_render_dpi: int = Field(
+        default=200,
+        alias="OCR_RENDER_DPI",
     )
 
     model_config = SettingsConfigDict(
