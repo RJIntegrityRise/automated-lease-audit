@@ -352,6 +352,9 @@ def evaluate_checklist_item(
     )
 
 
+
+
+
 def resolve_candidate(
     item: dict[str, Any],
     structured_data: dict[str, Any],
@@ -359,15 +362,21 @@ def resolve_candidate(
     field_name = item["field_name"]
     item_code = item["item_code"]
 
-    checklist_fields = structured_data.get(
-        "checklist_fields",
-        {},
+    # 1. Prefer deterministic structured fields.
+    mapped_path = CHECKLIST_FIELD_MAP.get(
+        item_code
     )
 
-    if item_code in checklist_fields:
-        return checklist_fields[item_code]
+    if mapped_path:
+        candidate = get_nested_value(
+            structured_data,
+            mapped_path,
+        )
 
+        if candidate is not None:
+            return candidate
 
+    # 2. Explicit section mappings.
     expected_section = CHECKLIST_SECTION_MAP.get(
         item_code
     )
@@ -384,18 +393,16 @@ def resolve_candidate(
             else None
         )
 
-    mapped_path = CHECKLIST_FIELD_MAP.get(
-        item_code
+    # 3. Fall back to scanner-generated checklist fields.
+    checklist_fields = structured_data.get(
+        "checklist_fields",
+        {},
     )
 
+    if item_code in checklist_fields:
+        return checklist_fields[item_code]
 
-
-    if mapped_path:
-        return get_nested_value(
-            structured_data,
-            mapped_path,
-        )
-
+    # 4. Direct normalized field-name match.
     normalized_field_name = normalize_key(
         field_name
     )
@@ -412,10 +419,13 @@ def resolve_candidate(
             direct_matches[0]
         ]
 
+    # 5. Last-resort label matching.
     return find_by_labels(
         structured_data=structured_data,
         labels=item.get("labels") or [],
     )
+
+
 
 
 def find_by_labels(
@@ -479,6 +489,37 @@ def value_is_populated(
     return True
 
 
+def normalize_confidence(
+    value: Any,
+) -> float | None:
+    if value in (
+        None,
+        "",
+    ):
+        return None
+
+    try:
+        confidence = float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    return max(
+        0.0,
+        min(
+            1.0,
+            confidence,
+        ),
+    )
+
+
+
+
+
+
+
 def create_result(
     item: dict[str, Any],
     status: str,
@@ -508,7 +549,7 @@ def create_result(
             if candidate
             else None
         ),
-        confidence=(
+        confidence=normalize_confidence(
             candidate.get("confidence")
             if candidate
             else None

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
+import traceback
 
 from supabase import Client
 
@@ -75,20 +76,22 @@ def run_deterministic_extraction(
 
 
     try:
-        document_metadata = dict(
+        document_metadata = (
             document.get("document_metadata") or {}
         )
 
-        document_metadata["ocr_metadata"] = (
+        ocr_metadata = (
             document.get("ocr_metadata") or {}
         )
 
-        document_metadata["ocr_used"] = (
-            document.get("ocr_used") or False
+        ocr_metadata["ocr_page_count"] = (
+            document.get("ocr_page_count") or 0
         )
 
-        document_metadata["ocr_page_count"] = (
-            document.get("ocr_page_count") or 0
+        document_metadata["ocr_metadata"] = ocr_metadata
+
+        document_metadata["ocr_used"] = (
+            document.get("ocr_used") or False
         )
 
 
@@ -102,9 +105,16 @@ def run_deterministic_extraction(
             document_metadata=document_metadata,
         )
 
-        configured_fields = detect_configured_labels(
+        section_page_ranges = (
+            result.section_page_ranges
+        )
+
+        checklist_fields = detect_configured_labels(
             pages=page_texts,
             checklist_items=checklist_catalog,
+            section_page_ranges=(
+                section_page_ranges
+            ),
         )
 
         structured_data = result.model_dump(
@@ -112,7 +122,7 @@ def run_deterministic_extraction(
         )
 
         structured_data["checklist_fields"] = (
-            configured_fields
+            checklist_fields
         )
 
 
@@ -141,6 +151,8 @@ def run_deterministic_extraction(
 
     
     except Exception as exc:
+        traceback.print_exc()
+
         (
             client.table("extraction_runs")
             .update(
@@ -189,11 +201,39 @@ def calculate_overall_confidence(
         "landlord_signature",
     ]
 
-    confidence_values = [
-        structured_data[field_name]["confidence"]
-        for field_name in field_names
-        if field_name in structured_data
-    ]
+    confidence_values: list[float] = []
+
+    for field_name in field_names:
+        field_data = structured_data.get(
+            field_name
+        )
+
+        if not isinstance(field_data, dict):
+            continue
+
+        raw_confidence = field_data.get(
+            "confidence"
+        )
+
+        if raw_confidence in (
+            None,
+            "",
+        ):
+            continue
+
+        try:
+            confidence = float(
+                raw_confidence
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        confidence_values.append(
+            confidence
+        )
 
     if not confidence_values:
         return 0.0

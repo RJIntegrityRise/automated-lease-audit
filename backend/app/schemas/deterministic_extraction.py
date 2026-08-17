@@ -75,6 +75,10 @@ class DeterministicLeaseExtraction(BaseModel):
 
     tenant_names: list[str] = Field(default_factory=list)
 
+    occupant_names: list[str] = Field(
+        default_factory=list
+    )
+
     tenant_signature_checks: list[SignaturePartyCheck] = Field(
         default_factory=list
     )
@@ -88,13 +92,25 @@ class DeterministicLeaseExtraction(BaseModel):
     unmatched_signature_names: list[str] = Field(
         default_factory=list
     )
+
+
     detected_sections: list[str] = Field(
         default_factory=list
+    )
+
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ] = Field(
+        default_factory=dict
     )
 
     detected_text_labels: list[str] = Field(
         default_factory=list
     )
+
+
+
 
     form_field_summary: dict[str, Any] = Field(
         default_factory=dict

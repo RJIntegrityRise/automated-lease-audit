@@ -9,6 +9,43 @@ from app.schemas.deterministic_extraction import (
 )
 from difflib import SequenceMatcher
 
+
+
+
+
+SECTION_START_PATTERNS = {
+    "apartment_lease_contract": [
+        "APARTMENT LEASE CONTRACT",
+    ],
+    "rent_concession_addendum": [
+        "LEASE ADDENDUM FOR RENT CONCESSION",
+        "RENT CONCESSION OR OTHER RENT DISCOUNT",
+    ],
+    "resident_parking_addendum": [
+        "RESIDENT PARKING ADDENDUM",
+    ],
+    "washer_dryer_addendum": [
+        "WASHER AND DRYER ADDENDUM",
+    ],
+    "liability_insurance_addendum": [
+        "LIABILITY INSURANCE REQUIRED OF RESIDENT",
+    ],
+    "no_smoking_addendum": [
+        "NO-SMOKING ADDENDUM",
+        "NO SMOKING ADDENDUM",
+    ],
+    "utility_services_addendum": [
+        "UTILITY AND SERVICES ADDENDUM",
+        "UTILITIES AND SERVICES ADDENDUM",
+    ],
+    "affordable_housing_addendum": [
+        "GOVERNMENT REGULATED AFFORDABLE HOUSING",
+        "AFFORDABLE HOUSING PROGRAMS",
+    ],
+}
+
+
+
 NUMERIC_DATE_PATTERN = re.compile(
     r"\b"
     r"(?:0?[1-9]|1[0-2])"
@@ -56,6 +93,34 @@ MONEY_PATTERN = re.compile(
     r"|[0-9]+(?:\.\d{2})?)"
 )
 
+def parse_money_amount(
+    raw_value: str | None,
+) -> float | None:
+    if raw_value is None:
+        return None
+
+    cleaned = raw_value.replace(
+        ",",
+        "",
+    ).strip()
+
+    if not cleaned:
+        return None
+
+    if not re.fullmatch(
+        r"\d+(?:\.\d{1,2})?",
+        cleaned,
+    ):
+        return None
+
+    try:
+        return float(cleaned)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
 NOTICE_PATTERN = re.compile(
     r"\b(\d{1,3})\s*[- ]?"
     r"(?:day|days)\b",
@@ -70,6 +135,12 @@ TENANT_SECTION_LABELS = [
     "lessee",
     "lessees",
 ]
+
+OCCUPANT_TEMPLATE_PHRASES = (
+    "the apartment will be occupied only by you",
+    "list all other occupants",
+    "not signing the lease contract",
+)
 
 NAME_LINE_PATTERN = re.compile(
     r"^[A-Za-z][A-Za-z.'\-]+"
@@ -208,6 +279,74 @@ def find_tenant_names(
     return deduplicate_names(detected_names)
 
 
+def is_template_occupant_text(
+    value: str,
+) -> bool:
+    lowered = value.lower()
+
+    return any(
+        phrase in lowered
+        for phrase in OCCUPANT_TEMPLATE_PHRASES
+    )
+
+
+def find_occupant_names(
+    pages: list[str],
+) -> list[str]:
+    occupant_names: list[str] = []
+
+    occupant_labels = (
+        "occupants",
+        "other occupants",
+        "persons who will occupy",
+    )
+
+    for page_text in pages:
+        lines = [
+            line.strip()
+            for line in page_text.splitlines()
+            if line.strip()
+        ]
+
+        for index, line in enumerate(lines):
+            lowered = line.lower()
+
+            if not any(
+                label in lowered
+                for label in occupant_labels
+            ):
+                continue
+
+            if is_template_occupant_text(
+                line
+            ):
+                continue
+
+            for candidate in lines[
+                index + 1:index + 5
+            ]:
+                if is_template_occupant_text(
+                    candidate
+                ):
+                    continue
+
+                if looks_like_person_name(
+                    candidate
+                ):
+                    occupant_names.append(
+                        candidate
+                    )
+
+                elif is_probable_section_heading(
+                    candidate
+                ):
+                    break
+
+    return deduplicate_names(
+        occupant_names
+    )
+
+
 def extract_value_after_colon(
     value: str,
 ) -> str | None:
@@ -319,8 +458,18 @@ def scan_lease_deterministically(
         normalized_pages
     )
 
+    occupant_names = find_occupant_names(
+        normalized_pages
+    )
+
     detected_sections = detect_sections(
         normalized_pages
+    )
+
+    section_page_ranges = (
+        detect_section_page_ranges(
+            normalized_pages
+        )
     )
 
 
@@ -354,8 +503,15 @@ def scan_lease_deterministically(
     full_text = "\n".join(normalized_pages)
     character_count = len(full_text.strip())
 
-    layout_term = find_lease_term_from_layout(
-        document_metadata
+    layout_term = (
+        find_lease_term_from_layout(
+            document_metadata=(
+                document_metadata
+            ),
+            section_page_ranges=(
+                section_page_ranges
+            ),
+        )
     )
 
     if layout_term is not None:
@@ -385,8 +541,15 @@ def scan_lease_deterministically(
             ],
         )
 
-    layout_rent = find_rent_from_layout(
-        document_metadata
+    layout_rent = (
+        find_monthly_rent_from_layout(
+            document_metadata=(
+                document_metadata
+            ),
+            section_page_ranges=(
+                section_page_ranges
+            ),
+        )
     )
 
     if layout_rent is not None:
@@ -396,24 +559,47 @@ def scan_lease_deterministically(
             normalized_pages,
             labels=[
                 "monthly rent",
-                "base rent",
-                "rent per month",
-                "monthly rental",
                 "rent and charges",
+                "rent per month",
             ],
         )
 
-    security_deposit = find_labeled_money(
-        normalized_pages,
-        labels=[
-            "security deposit",
-            "deposit amount",
-            "refundable deposit",
-        ],
+    
+
+
+
+    layout_deposit = (
+        find_security_deposit_from_layout(
+            document_metadata=(
+                document_metadata
+            ),
+            section_page_ranges=(
+                section_page_ranges
+            ),
+        )
     )
 
-    notice_period = find_notice_period(
-        normalized_pages
+    if layout_deposit is not None:
+        security_deposit = (
+            layout_deposit
+        )
+    else:
+        security_deposit = (
+            find_security_deposit_scoped(
+                page_texts=normalized_pages,
+                section_page_ranges=(
+                    section_page_ranges
+                ),
+            )
+        )
+
+    notice_period = (
+        find_notice_period_scoped(
+            page_texts=normalized_pages,
+            section_page_ranges=(
+                section_page_ranges
+            ),
+        )
     )
 
     signature_result = inspect_signatures(
@@ -469,12 +655,16 @@ def scan_lease_deterministically(
         {},
     )
 
-    ocr_page_count = int(
-        ocr_metadata.get(
-            "ocr_page_count",
-            0,
-        )
+    raw_ocr_page_count = ocr_metadata.get(
+        "ocr_page_count"
     )
+
+    try:
+        ocr_page_count = int(
+            raw_ocr_page_count or 0
+        )
+    except (TypeError, ValueError):
+        ocr_page_count = 0
 
     signature_image_review_required = any(
         page.get("likely_signature_mark")
@@ -544,6 +734,7 @@ def scan_lease_deterministically(
         lease_contract_date=lease_contract_date,
 
         tenant_names=tenant_names,
+        occupant_names=occupant_names,
 
         tenant_signature=signature_result[
             "tenant_signature"
@@ -603,6 +794,7 @@ def scan_lease_deterministically(
         ),
 
         detected_sections=detected_sections,
+        section_page_ranges=section_page_ranges,
         detected_text_labels=[],
     )
 
@@ -646,6 +838,9 @@ def find_form_field_value(
         normalized_name = normalize_key(
             field_name
         )
+
+        if not normalized_name:
+            continue
 
         matches = any(
             label in normalized_name
@@ -789,9 +984,14 @@ def find_labeled_money(
             match = MONEY_PATTERN.search(nearby_text)
 
             if match:
-                amount = float(
-                    match.group(1).replace(",", "")
+                amount = parse_money_amount(
+                    match.group(1)
                 )
+
+                if amount is None:
+                    continue
+
+    
 
                 return DetectedValue(
                     value=amount,
@@ -1199,16 +1399,11 @@ def determine_signature_role(
 def normalize_date(
     value: str,
 ) -> str:
-    cleaned = (
-        value
-        .replace("1st", "1")
-        .replace("2nd", "2")
-        .replace("3rd", "3")
-        .replace("st", "")
-        .replace("nd", "")
-        .replace("rd", "")
-        .replace("th", "")
-        .strip()
+    cleaned = re.sub(
+        r"(\d{1,2})(st|nd|rd|th)\b",
+        r"\1",
+        value.strip(),
+        flags=re.IGNORECASE,
     )
 
     formats = (
@@ -1537,12 +1732,17 @@ def find_ocr_signature_evidence(
 
 def detect_configured_labels(
     pages: list[str],
-    checklist_items: list[dict[str, Any]],
+    checklist_items: list[
+        dict[str, Any]
+    ],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
 ) -> dict[str, dict[str, Any]]:
     """
-    Detect configured checklist fields directly from page text.
-
-    The result is keyed by checklist item_code.
+    Detect configured checklist fields from
+    the appropriate lease section.
     """
 
     detected: dict[str, dict[str, Any]] = {}
@@ -1554,14 +1754,46 @@ def detect_configured_labels(
         if not labels:
             continue
 
+        configuration = (
+            item.get("configuration")
+            or {}
+        )
+
+        section_name = (
+            configuration.get(
+                "section"
+            )
+            or configuration.get(
+                "conditional_section"
+            )
+        )
+
+        if section_name:
+            scoped_pages = get_section_pages(
+                page_texts=pages,
+                section_page_ranges=(
+                    section_page_ranges
+                ),
+                section_name=section_name,
+            )
+
+            pages_to_search = [
+                text
+                for _, text in scoped_pages
+            ]
+        else:
+            pages_to_search = pages
+
         result = detect_checklist_value(
-            pages=pages,
+            pages=pages_to_search,
             labels=labels,
             check_type=check_type,
         )
 
         detected[item["item_code"]] = (
-            result.model_dump(mode="json")
+            result.model_dump(
+                mode="json"
+            )
         )
 
     return detected
@@ -1594,13 +1826,15 @@ def detect_checklist_value(
                 )
 
                 if match:
+                    amount = parse_money_amount(
+                        match.group(1)
+                    )
+
+                    if amount is None:
+                        continue
+
                     return DetectedValue(
-                        value=float(
-                            match.group(1).replace(
-                                ",",
-                                "",
-                            )
-                        ),
+                        value=amount,
                         status="detected",
                         page_number=page_index + 1,
                         source_text=nearby_text[:250],
@@ -1824,190 +2058,496 @@ def build_visual_lines(
     )
 
 
-def find_rent_from_layout(
-    document_metadata: dict,
-) -> DetectedValue | None:
-    page_layouts = document_metadata.get(
+def find_lease_term_from_layout(
+    document_metadata: dict[str, Any],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+) -> dict[str, DetectedValue] | None:
+    section = section_page_ranges.get(
+        "apartment_lease_contract"
+    )
+
+    if not section:
+        return None
+
+    layouts = document_metadata.get(
         "page_layout",
         [],
     )
 
-    for page in page_layouts:
-        lines = build_visual_lines(page)
+    for page in layouts:
+        page_number = page.get(
+            "page_number"
+        )
 
-        rent_heading_y = None
-
-        for line in lines:
-            if (
-                "rent and charges"
-                in line["text"].lower()
-            ):
-                rent_heading_y = line["y0"]
-                break
-
-        if rent_heading_y is None:
+        if not page_number:
             continue
 
-        # Only inspect a small visual region beneath
-        # the RENT AND CHARGES heading.
-        candidates = [
-            line
-            for line in lines
-            if (
-                rent_heading_y
-                <= line["y0"]
-                <= rent_heading_y + 70
+        if not (
+            section["start_page"]
+            <= page_number
+            <= section["end_page"]
+        ):
+            continue
+
+        lines = build_visual_lines(
+            page
+        )
+
+        for index, line in enumerate(lines):
+            text = line[
+                "text"
+            ].lower()
+
+            if "lease term" not in text:
+                continue
+
+            nearby = " ".join(
+                item["text"]
+                for item in lines[
+                    index:index + 10
+                ]
             )
-        ]
 
-        for line in candidates:
-            text = line["text"]
-
-            match = re.search(
-                r"\$\s*"
-                r"([0-9]+(?:,[0-9]{3})*"
-                r"(?:\.\d{2})?)"
-                r"\s*(?:per month|monthly)",
-                text,
+            start_match = re.search(
+                r"begins\s+on\s+the\s+"
+                r"(\d{1,2})(?:st|nd|rd|th)?"
+                r"\s+day\s+of\s+"
+                r"([A-Za-z]+)"
+                r"\s*,?\s*"
+                r"(\d{4})",
+                nearby,
                 re.IGNORECASE,
             )
 
-            if match:
-                amount = float(
-                    match.group(1).replace(
-                        ",",
-                        "",
-                    )
+            end_match = re.search(
+                r"ends\s+at.*?"
+                r"(\d{1,2})(?:st|nd|rd|th)?"
+                r"\s+day\s+of\s+"
+                r"([A-Za-z]+)"
+                r"\s*,?\s*"
+                r"(\d{4})",
+                nearby,
+                re.IGNORECASE,
+            )
+
+            if not (
+                start_match
+                and end_match
+            ):
+                continue
+
+            start_raw = (
+                f"{start_match.group(2)} "
+                f"{start_match.group(1)}, "
+                f"{start_match.group(3)}"
+            )
+
+            end_raw = (
+                f"{end_match.group(2)} "
+                f"{end_match.group(1)}, "
+                f"{end_match.group(3)}"
+            )
+
+            return {
+                "start": DetectedValue(
+                    value=normalize_date(
+                        start_raw
+                    ),
+                    status="detected",
+                    page_number=page_number,
+                    source_text=nearby[:400],
+                    confidence=0.98,
+                ),
+                "end": DetectedValue(
+                    value=normalize_date(
+                        end_raw
+                    ),
+                    status="detected",
+                    page_number=page_number,
+                    source_text=nearby[:400],
+                    confidence=0.98,
+                ),
+            }
+
+    return None
+
+
+def find_security_deposit_from_layout(
+    document_metadata: dict[str, Any],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+) -> DetectedValue | None:
+    section = section_page_ranges.get(
+        "apartment_lease_contract"
+    )
+
+    if not section:
+        return None
+
+    start_page = section["start_page"]
+    end_page = section["end_page"]
+
+    layouts = document_metadata.get(
+        "page_layout",
+        [],
+    )
+
+    for page in layouts:
+        page_number = page.get(
+            "page_number"
+        )
+
+        if (
+            page_number is None
+            or page_number < start_page
+            or page_number > end_page
+        ):
+            continue
+
+        lines = build_visual_lines(
+            page
+        )
+
+        for index, line in enumerate(lines):
+            if (
+                "security deposit"
+                not in line["text"].lower()
+            ):
+                continue
+
+            nearby_lines = lines[
+                index:
+                min(
+                    index + 8,
+                    len(lines),
+                )
+            ]
+
+            nearby_text = " ".join(
+                item["text"]
+                for item in nearby_lines
+            )
+
+            money_match = re.search(
+                r"\$\s*"
+                r"([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)",
+                nearby_text,
+            )
+
+            if money_match:
+                value = parse_money_amount(
+                    money_match.group(1)
                 )
 
+                if value is None:
+                    continue
+
+
+
                 return DetectedValue(
-                    value=amount,
+                    value=value,
                     status="detected",
-                    page_number=page[
-                        "page_number"
+                    page_number=page_number,
+                    source_text=nearby_text[
+                        :350
                     ],
-                    source_text=text,
                     confidence=0.98,
                 )
 
     return None
 
 
-def find_lease_term_from_layout(
-    document_metadata: dict,
-) -> dict[str, DetectedValue] | None:
-    page_layouts = document_metadata.get(
+def find_monthly_rent_from_layout(
+    document_metadata: dict[str, Any],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+) -> DetectedValue | None:
+    section = section_page_ranges.get(
+        "apartment_lease_contract"
+    )
+
+    if not section:
+        return None
+
+    layouts = document_metadata.get(
         "page_layout",
         [],
     )
 
-    for page in page_layouts:
-        lines = build_visual_lines(page)
+    for page in layouts:
+        page_number = page.get(
+            "page_number"
+        )
 
-        lease_term_y = None
-
-        for line in lines:
-            text = line["text"].lower()
-
-            if "lease term" in text:
-                lease_term_y = line["y0"]
-                break
-
-        if lease_term_y is None:
+        if not page_number:
             continue
 
-        nearby_lines = [
-            line["text"]
-            for line in lines
+        if not (
+            section["start_page"]
+            <= page_number
+            <= section["end_page"]
+        ):
+            continue
+
+        lines = build_visual_lines(
+            page
+        )
+
+        for index, line in enumerate(lines):
             if (
-                lease_term_y
-                <= line["y0"]
-                <= lease_term_y + 100
-            )
-        ]
+                "rent and charges"
+                not in line["text"].lower()
+            ):
+                continue
 
-        nearby_text = " ".join(
-            nearby_lines
-        )
-
-        start_match = re.search(
-            r"begins\s+on\s+the\s+"
-            r"(\d{1,2})(?:st|nd|rd|th)?"
-            r"\s+day\s+of\s+"
-            r"([A-Za-z]+)"
-            r"\s*,?\s*(\d{4})",
-            nearby_text,
-            re.IGNORECASE,
-        )
-
-        end_match = re.search(
-            r"(?:ends|and\s+ends).*?"
-            r"(\d{1,2})(?:st|nd|rd|th)?"
-            r"\s+day\s+of\s+"
-            r"([A-Za-z]+)"
-            r"\s*,?\s*(\d{4})",
-            nearby_text,
-            re.IGNORECASE,
-        )
-
-        if not start_match and not end_match:
-            continue
-
-        start_result = DetectedValue(
-            status="not_detected",
-            page_number=page["page_number"],
-            confidence=0.9,
-            source_text=nearby_text[:400],
-        )
-
-        end_result = DetectedValue(
-            status="not_detected",
-            page_number=page["page_number"],
-            confidence=0.9,
-            source_text=nearby_text[:400],
-        )
-
-        if start_match:
-            raw_start = (
-                f"{start_match.group(2)} "
-                f"{start_match.group(1)}, "
-                f"{start_match.group(3)}"
+            nearby = " ".join(
+                row["text"]
+                for row in lines[
+                    index:index + 8
+                ]
             )
 
-            start_result = DetectedValue(
-                value=normalize_date(
-                    raw_start
+            match = re.search(
+                r"\$\s*"
+                r"([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)"
+                r"\s+per\s+month",
+                nearby,
+                re.IGNORECASE,
+            )
+
+            if not match:
+                continue
+
+
+            amount = parse_money_amount(
+                match.group(1)
+            )
+
+            if amount is None:
+                continue
+
+            return DetectedValue(
+                value=float(
+                    match.group(1)
+                    .replace(",", "")
                 ),
                 status="detected",
-                page_number=page[
-                    "page_number"
-                ],
-                source_text=nearby_text[:400],
+                page_number=page_number,
+                source_text=nearby[:350],
                 confidence=0.98,
             )
-
-        if end_match:
-            raw_end = (
-                f"{end_match.group(2)} "
-                f"{end_match.group(1)}, "
-                f"{end_match.group(3)}"
-            )
-
-            end_result = DetectedValue(
-                value=normalize_date(
-                    raw_end
-                ),
-                status="detected",
-                page_number=page[
-                    "page_number"
-                ],
-                source_text=nearby_text[:400],
-                confidence=0.98,
-            )
-
-        return {
-            "start": start_result,
-            "end": end_result,
-        }
 
     return None
+
+
+
+
+def detect_section_page_ranges(
+    page_texts: list[str],
+) -> dict[str, dict[str, int]]:
+    """
+    Find the first page where each known lease section/addendum begins.
+
+    Returns:
+    {
+        "apartment_lease_contract": {
+            "start_page": 7,
+            "end_page": 16,
+        }
+    }
+    """
+
+    starts: list[tuple[str, int]] = []
+
+    for page_index, page_text in enumerate(
+        page_texts,
+        start=1,
+    ):
+        normalized = page_text.upper()
+
+        for section_name, patterns in (
+            SECTION_START_PATTERNS.items()
+        ):
+            if any(
+                pattern.upper() in normalized
+                for pattern in patterns
+            ):
+                already_found = any(
+                    existing_name == section_name
+                    for existing_name, _ in starts
+                )
+
+                if not already_found:
+                    starts.append(
+                        (
+                            section_name,
+                            page_index,
+                        )
+                    )
+
+    starts.sort(
+        key=lambda item: item[1]
+    )
+
+    ranges: dict[str, dict[str, int]] = {}
+
+    for index, (
+        section_name,
+        start_page,
+    ) in enumerate(starts):
+
+        if index + 1 < len(starts):
+            next_start = starts[index + 1][1]
+            end_page = next_start - 1
+        else:
+            end_page = len(page_texts)
+
+        ranges[section_name] = {
+            "start_page": start_page,
+            "end_page": end_page,
+        }
+
+    return ranges
+
+def get_section_pages(
+    page_texts: list[str],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+    section_name: str,
+) -> list[tuple[int, str]]:
+    section_range = section_page_ranges.get(
+        section_name
+    )
+
+    if not section_range:
+        return []
+
+    start_page = section_range[
+        "start_page"
+    ]
+    end_page = section_range[
+        "end_page"
+    ]
+
+    return [
+        (
+            page_number,
+            page_texts[page_number - 1],
+        )
+        for page_number in range(
+            start_page,
+            end_page + 1,
+        )
+    ]
+
+
+def find_security_deposit_scoped(
+    page_texts: list[str],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+) -> DetectedValue:
+    pages = get_section_pages(
+        page_texts=page_texts,
+        section_page_ranges=section_page_ranges,
+        section_name="apartment_lease_contract",
+    )
+
+    for page_number, page_text in pages:
+        match = re.search(
+            r"SECURITY\s+DEPOSIT.*?"
+            r"\$\s*"
+            r"([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)",
+            page_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        if match:
+            amount = parse_money_amount(
+                match.group(1)
+            )
+
+            if amount is None:
+                continue
+
+            return DetectedValue(
+                value=amount,
+                status="detected",
+                page_number=page_number,
+                source_text=match.group(0)[
+                    :300
+                ],
+                confidence=0.95,
+            )
+
+    return DetectedValue(
+        value=None,
+        status="not_detected",
+        confidence=1.0,
+    )
+
+
+def find_notice_period_scoped(
+    page_texts: list[str],
+    section_page_ranges: dict[
+        str,
+        dict[str, int],
+    ],
+) -> DetectedValue:
+    pages = get_section_pages(
+        page_texts=page_texts,
+        section_page_ranges=(
+            section_page_ranges
+        ),
+        section_name=(
+            "apartment_lease_contract"
+        ),
+    )
+
+    patterns = [
+        re.compile(
+            r"at\s+least\s+"
+            r"(\d{1,3})"
+            r"\s+days['’]?\s+written\s+notice",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"notice\s+no\s+later\s+than\s+"
+            r"(\d{1,3})"
+            r"\s+days",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for page_number, page_text in pages:
+        for pattern in patterns:
+            match = pattern.search(
+                page_text
+            )
+
+            if match:
+                return DetectedValue(
+                    value=int(
+                        match.group(1)
+                    ),
+                    status="detected",
+                    page_number=page_number,
+                    source_text=match.group(0),
+                    confidence=0.95,
+                )
+
+    return DetectedValue(
+        value=None,
+        status="not_detected",
+        confidence=1.0,
+    )
