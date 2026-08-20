@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { authenticatedFetch } from "@/lib/api";
 
 import { AuditResults } from "@/components/audit-results";
 
@@ -84,16 +85,15 @@ export function LeaseDetailView({
 
 
 
-  const apiUrl =
-    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  
 
   const loadLease = useCallback(async () => {
     setLoading(true);
     setError("");
 
     try {
-      const response = await fetch(
-        `${apiUrl}/api/leases/${leaseId}`,
+      const response = await authenticatedFetch(
+        `/api/leases/${leaseId}`,
         {
           method: "GET",
           cache: "no-store",
@@ -130,7 +130,7 @@ export function LeaseDetailView({
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, leaseId]);
+  }, [leaseId]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -151,8 +151,8 @@ export function LeaseDetailView({
     setCurrentExtractionRunId(null);
 
     try {
-      const response = await fetch(
-        `${apiUrl}/api/leases/${leaseId}/scan`,
+      const response = await authenticatedFetch(
+        `/api/leases/${leaseId}/scan`,
         {
           method: "POST",
         },
@@ -183,8 +183,8 @@ export function LeaseDetailView({
       setCurrentExtractionRunId(runId);
       setScanResult(scanData);
 
-      const checklistResponse = await fetch(
-        `${apiUrl}/api/leases/${leaseId}/checklist?extraction_run_id=${encodeURIComponent(
+      const checklistResponse = await authenticatedFetch(
+        `/api/leases/${leaseId}/checklist?extraction_run_id=${encodeURIComponent(
             runId,
         )}`,
         {
@@ -247,8 +247,8 @@ export function LeaseDetailView({
     setAuditMessage("");
 
     try {
-      const response = await fetch(
-        `${apiUrl}/api/leases/${leaseId}/extract`,
+      const response = await authenticatedFetch(
+        `/api/leases/${leaseId}/extract`,
         {
           method: "POST",
         },
@@ -311,8 +311,8 @@ export function LeaseDetailView({
   setAuditMessage("");
 
   try {
-    const response = await fetch(
-      `${apiUrl}/api/leases/${leaseId}/audit?extraction_run_id=${encodeURIComponent(
+    const response = await authenticatedFetch(
+      `/api/leases/${leaseId}/audit?extraction_run_id=${encodeURIComponent(
         currentExtractionRunId,
       )}`,
       {
@@ -357,6 +357,67 @@ export function LeaseDetailView({
 
 
   }
+
+
+
+    async function downloadPdfReport() {
+      if (!currentExtractionRunId) {
+        setAuditMessage(
+          "Run a lease scan before downloading the report.",
+        );
+        return;
+      }
+
+      try {
+        const response = await authenticatedFetch(
+          `/api/leases/${leaseId}/report.pdf?extraction_run_id=${encodeURIComponent(
+            currentExtractionRunId,
+          )}`,
+          {
+            method: "GET",
+          },
+        );
+
+        if (!response.ok) {
+          let message = "Unable to generate PDF report.";
+
+          try {
+            const errorResponse =
+              (await response.json()) as ApiErrorResponse;
+
+            if (errorResponse.detail) {
+              message = errorResponse.detail;
+            }
+          } catch {
+           // Use the generic error message.
+          }
+
+          throw new Error(message);
+        }
+
+        const blob = await response.blob();
+        const downloadUrl =
+        window.URL.createObjectURL(blob);
+
+        const link = document.createElement("a");
+
+        link.href = downloadUrl;
+        link.download = `lease-audit-${leaseId}.pdf`;
+
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        window.URL.revokeObjectURL(downloadUrl);
+      } catch (downloadError) {
+        setAuditMessage(
+          downloadError instanceof Error
+            ? downloadError.message
+            : "Unable to download PDF report.",
+        );
+      }
+    }
+
 
 
 
@@ -489,6 +550,23 @@ export function LeaseDetailView({
 
             {auditing ? "Auditing..." : "Run lease audit"}
           </button>
+
+
+          <button
+            type="button"
+            onClick={() => void downloadPdfReport()}
+            disabled={
+              !currentExtractionRunId ||
+              scanning ||
+              extracting ||
+              auditing
+            }
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <FileText className="h-4 w-4" />
+            Download PDF Report
+          </button>
+
 
         </div>
       </div>

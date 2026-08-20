@@ -1,5 +1,7 @@
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends,  HTTPException, Query, status
 
+
+from app.core.auth import get_current_user
 from app.core.supabase import get_supabase_client
 from app.schemas.dashboard import (
     DashboardSummaryResponse,
@@ -13,6 +15,7 @@ from app.services.dashboard_service import (
 router = APIRouter(
     prefix="/api/dashboard",
     tags=["Dashboard"],
+    dependencies=[Depends(get_current_user)],
 )
 
 

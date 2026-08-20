@@ -9,6 +9,9 @@ from app.core.config import get_settings
 from app.api.leases import router as leases_router
 from app.api.dashboard import router as dashboard_router
 
+from app.api.reports import router as reports_router
+
+from app.api.admin_users import router as admin_users_router
 
 settings = get_settings()
 
@@ -32,6 +35,8 @@ app.include_router(leases_router)
 
 app.include_router(audits_router)
 app.include_router(dashboard_router)
+app.include_router(reports_router)
+app.include_router(admin_users_router)
 
 
 @app.get("/", tags=["Root"])

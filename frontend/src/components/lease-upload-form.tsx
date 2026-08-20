@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import { ChangeEvent, FormEvent, useRef, useState } from "react";
 
+import { authenticatedFetch } from "@/lib/api";
+
 import type {
   ApiErrorResponse,
   LeaseUploadResponse,
@@ -32,8 +34,7 @@ export function LeaseUploadForm() {
   const [result, setResult] =
     useState<LeaseUploadResponse | null>(null);
 
-  const apiUrl =
-    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  
 
   function resetStatus() {
     setUploadState("idle");
@@ -99,8 +100,8 @@ export function LeaseUploadForm() {
     setResult(null);
 
     try {
-      const response = await fetch(
-        `${apiUrl}/api/leases/upload`,
+      const response = await authenticatedFetch(
+        "/api/leases/upload",
         {
           method: "POST",
           body: formData,

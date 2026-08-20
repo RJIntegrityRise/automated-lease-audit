@@ -110,6 +110,7 @@ def list_leases(
             if normalized_search
             in " ".join(
                 [
+                    lease.get("id") or "",
                     lease.get("internal_lease_id") or "",
                     lease.get("unit_number") or "",
                     " ".join(
@@ -119,59 +120,123 @@ def list_leases(
             ).lower()
         ]
 
+    if not leases:
+        return {
+            "items": [],
+            "total": (
+                leases_response.count
+                if leases_response.count is not None
+                else 0
+            ),
+        }
+
+    lease_ids = [
+        lease["id"]
+        for lease in leases
+    ]
+
+    documents_response = (
+        client.table("lease_documents")
+        .select(
+            (
+                "lease_id,"
+                "original_filename,"
+                "page_count,"
+                "created_at"
+            )
+        )
+        .in_("lease_id", lease_ids)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    extractions_response = (
+        client.table("extraction_runs")
+        .select(
+            (
+                "id,"
+                "lease_id,"
+                "status,"
+                "created_at"
+            )
+        )
+        .in_("lease_id", lease_ids)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    audits_response = (
+        client.table("audits")
+        .select(
+            (
+                "id,"
+                "lease_id,"
+                "score,"
+                "recommendation,"
+                "created_at"
+            )
+        )
+        .in_("lease_id", lease_ids)
+        .eq("status", "completed")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    latest_document_by_lease: dict[str, dict] = {}
+
+    for document in documents_response.data or []:
+        lease_id = document["lease_id"]
+
+        if lease_id not in latest_document_by_lease:
+            latest_document_by_lease[
+                lease_id
+            ] = document
+
+    latest_extraction_by_lease: dict[
+        str,
+        dict,
+    ] = {}
+
+    for extraction in (
+        extractions_response.data or []
+    ):
+        lease_id = extraction["lease_id"]
+
+        if lease_id not in latest_extraction_by_lease:
+            latest_extraction_by_lease[
+                lease_id
+            ] = extraction
+
+    latest_audit_by_lease: dict[str, dict] = {}
+
+    for audit in audits_response.data or []:
+        lease_id = audit["lease_id"]
+
+        if lease_id not in latest_audit_by_lease:
+            latest_audit_by_lease[
+                lease_id
+            ] = audit
+
     items: list[dict[str, Any]] = []
 
     for lease in leases:
         lease_id = lease["id"]
 
-        document_response = (
-            client.table("lease_documents")
-            .select(
-                "original_filename,page_count,created_at"
-            )
-            .eq("lease_id", lease_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-
-        extraction_response = (
-            client.table("extraction_runs")
-            .select("id,status,created_at")
-            .eq("lease_id", lease_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-
-        audit_response = (
-            client.table("audits")
-            .select(
-                "id,score,recommendation,created_at"
-            )
-            .eq("lease_id", lease_id)
-            .eq("status", "completed")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-
-        document = (
-            document_response.data[0]
-            if document_response.data
-            else {}
+        document = latest_document_by_lease.get(
+            lease_id,
+            {},
         )
 
         extraction = (
-            extraction_response.data[0]
-            if extraction_response.data
-            else {}
+            latest_extraction_by_lease.get(
+                lease_id,
+                {},
+            )
         )
 
-        audit = (
-            audit_response.data[0]
-            if audit_response.data
-            else {}
+        audit = latest_audit_by_lease.get(
+            lease_id,
+            {},
         )
 
         items.append(
@@ -180,23 +245,35 @@ def list_leases(
                 "original_filename": document.get(
                     "original_filename"
                 ),
-                "page_count": document.get("page_count"),
-                "latest_extraction_run_id": extraction.get(
+                "page_count": document.get(
+                    "page_count"
+                ),
+                "latest_extraction_run_id": (
+                    extraction.get("id")
+                ),
+                "latest_extraction_status": (
+                    extraction.get("status")
+                ),
+                "latest_extraction_created_at": (
+                    extraction.get(
+                        "created_at"
+                    )
+                ),
+                "latest_audit_id": audit.get(
                     "id"
                 ),
-                "latest_extraction_status": extraction.get(
-                    "status"
+                "latest_audit_score": audit.get(
+                    "score"
                 ),
-                "latest_extraction_created_at": extraction.get(
-                    "created_at"
+                "latest_audit_recommendation": (
+                    audit.get(
+                        "recommendation"
+                    )
                 ),
-                "latest_audit_id": audit.get("id"),
-                "latest_audit_score": audit.get("score"),
-                "latest_audit_recommendation": audit.get(
-                    "recommendation"
-                ),
-                "latest_audit_created_at": audit.get(
-                    "created_at"
+                "latest_audit_created_at": (
+                    audit.get(
+                        "created_at"
+                    )
                 ),
             }
         )

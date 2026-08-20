@@ -5,12 +5,24 @@ import traceback
 from supabase import Client
 
 from app.services.deterministic_scanner import (
+    calculate_all_tenants_signed,
     detect_configured_labels,
+    match_tenants_to_signatures,
     scan_lease_deterministically,
 )
 
+from app.core.config import get_settings
 
-SCANNER_VERSION = "deterministic-v1"
+from app.v2.extraction.service import (
+    extract_v2,
+)
+
+from app.v2.extraction.v1_adapter import (
+    v2_to_v1_structured_data,
+)
+
+SCANNER_VERSION = "deterministic-v2"
+settings = get_settings()
 
 
 def run_deterministic_extraction(
@@ -25,6 +37,7 @@ def run_deterministic_extraction(
             (
                 "id,"
                 "lease_id,"
+                "storage_path,"
                 "extracted_text,"
                 "document_metadata,"
                 "ocr_metadata,"
@@ -76,6 +89,56 @@ def run_deterministic_extraction(
 
 
     try:
+
+        storage_path = document.get(
+            "storage_path"
+        )
+
+        if not storage_path:
+            raise ValueError(
+                "Lease document has no storage path."
+            )
+
+        pdf_bytes = (
+            client.storage
+            .from_(
+                settings.supabase_storage_bucket
+            )
+            .download(
+                storage_path
+            )
+        )
+
+        if not pdf_bytes:
+            raise ValueError(
+                "Unable to download lease PDF."
+            )
+
+        storage_path = document.get(
+            "storage_path"
+        )
+
+        if not storage_path:
+            raise ValueError(
+                "Lease document has no storage path."
+            )
+
+        pdf_bytes = (
+            client.storage
+            .from_(
+                settings.supabase_storage_bucket
+            )
+            .download(
+                storage_path
+            )
+        )
+
+        if not pdf_bytes:
+            raise ValueError(
+                "Unable to download lease PDF."
+            )
+        
+
         document_metadata = (
             document.get("document_metadata") or {}
         )
@@ -105,6 +168,14 @@ def run_deterministic_extraction(
             document_metadata=document_metadata,
         )
 
+        v2_result = extract_v2(
+            pdf_bytes=pdf_bytes,
+            lease_id=lease_id,
+            document_id=document["id"],
+        )
+
+        
+
         section_page_ranges = (
             result.section_page_ranges
         )
@@ -120,6 +191,65 @@ def run_deterministic_extraction(
         structured_data = result.model_dump(
             mode="json"
         )
+
+        structured_data = (
+            v2_to_v1_structured_data(
+                result=v2_result,
+                existing=structured_data,
+            )
+        )
+
+
+
+        v2_tenant_names = list(
+            v2_result.core.resident_names
+        )
+
+        tenant_matching = (
+            match_tenants_to_signatures(
+                tenant_names=v2_tenant_names,
+                signature_parties=(
+                    result.signature_parties
+                ),
+            )
+        )
+
+        all_named_tenants_signed = (
+            calculate_all_tenants_signed(
+                tenant_names=v2_tenant_names,
+                signature_checks=(
+                    tenant_matching["checks"]
+                ),
+            )
+        )
+
+        structured_data[
+            "tenant_signature_checks"
+        ] = [
+            item.model_dump(mode="json")
+            for item in tenant_matching["checks"]
+        ]
+
+        structured_data[
+            "unmatched_tenant_names"
+        ] = tenant_matching[
+            "unmatched_tenant_names"
+        ]
+
+        structured_data[
+            "unmatched_signature_names"
+        ] = tenant_matching[
+            "unmatched_signature_names"
+        ]
+
+        structured_data[
+            "all_named_tenants_signed"
+        ] = all_named_tenants_signed.model_dump(
+            mode="json"
+        )
+
+
+
 
         structured_data["checklist_fields"] = (
             checklist_fields

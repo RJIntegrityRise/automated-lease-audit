@@ -9,12 +9,20 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import { createClient } from "@/lib/supabase";
 
 import type {
   DashboardSummary,
   LeaseListResponse,
 } from "@/lib/types";
+import { authenticatedFetch } from "@/lib/api";
 
 export function DashboardView() {
   const [summary, setSummary] =
@@ -25,9 +33,55 @@ export function DashboardView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const apiUrl =
-    process.env.NEXT_PUBLIC_API_URL ??
-    "http://localhost:8000";
+  const supabase = useMemo(
+    () => createClient(),
+    [],
+  );
+
+  const [currentRole, setCurrentRole] =
+    useState<string | null>(null);
+
+  const [deletingLeaseId, setDeletingLeaseId] =
+    useState<string | null>(null);
+
+
+
+
+  useEffect(() => {
+    async function loadRole() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
+        return;
+      }
+
+      const { data: profile } =
+        await supabase
+          .from("profiles")
+          .select("role")
+          .eq("id", session.user.id)
+          .single();
+
+      if (profile) {
+        setCurrentRole(profile.role);
+      }
+    }
+
+    void loadRole();
+  }, [supabase]);
+
+  const canDeleteLease =
+    currentRole === "admin" ||
+    currentRole === "master_admin"; 
+
+
+
+
+
+
+  
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
@@ -40,10 +94,10 @@ export function DashboardView() {
 
       const [summaryResponse, leasesResponse] =
         await Promise.all([
-          fetch(`${apiUrl}/api/dashboard/summary`, {
+          authenticatedFetch(`/api/dashboard/summary`, {
             cache: "no-store",
           }),
-          fetch(`${apiUrl}/api/dashboard/leases${query}`, {
+          authenticatedFetch(`/api/dashboard/leases${query}`, {
             cache: "no-store",
           }),
         ]);
@@ -68,12 +122,63 @@ export function DashboardView() {
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, search]);
+  }, [search]);
 
   useEffect(() => {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   void loadDashboard();
   }, [loadDashboard]);
+
+
+  async function handleDeleteLease(
+    leaseId: string,
+    leaseName: string,
+  ) {
+    const confirmed = window.confirm(
+      `Permanently delete "${leaseName}"?\n\n` +
+        "This will remove the lease, stored PDF, scans, audits, and related history.\n\n" +
+        "This action cannot be undone.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingLeaseId(leaseId);
+    setError("");
+
+    try {
+      const response = await authenticatedFetch(
+        `/api/leases/${leaseId}`,
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (!response.ok) {
+        const body = await response
+          .json()
+          .catch(() => null);
+
+        throw new Error(
+          body?.detail ??
+            "Unable to delete lease.",
+        );
+      }
+
+      await loadDashboard();
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Unable to delete lease.",
+      );
+    } finally {
+      setDeletingLeaseId(null);
+    }
+  }
+
+
 
   if (loading) {
     return (
@@ -217,12 +322,36 @@ export function DashboardView() {
                   </td>
 
                   <td className="px-5 py-4">
-                    <Link
-                      href={`/leases/${lease.id}`}
-                      className="font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
-                    >
-                      Open
-                    </Link>
+                    <div className="flex items-center gap-3">
+                      <Link
+                        href={`/leases/${lease.id}`}
+                        className="font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                      >
+                        Open
+                      </Link>
+
+                      {canDeleteLease ? (
+                        <button
+                          type="button"
+                            disabled={
+                              deletingLeaseId === lease.id
+                            }
+                            onClick={() =>
+                              handleDeleteLease(
+                                lease.id,
+                                lease.internal_lease_id ??
+                                  lease.original_filename ??
+                                  "this lease",
+                              )
+                            }
+                            className="font-medium text-red-600 hover:text-red-700 disabled:opacity-50 dark:text-red-400"
+                          >
+                            {deletingLeaseId === lease.id
+                              ? "Deleting..."
+                              : "Delete"}
+                          </button>
+                        ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}

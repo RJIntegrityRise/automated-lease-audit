@@ -1,7 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+
+from app.core.auth import get_current_user
 from app.core.supabase import get_supabase_client
 from app.schemas.audit import AuditSummaryResponse
 from app.services.audit_service import (
@@ -9,7 +11,10 @@ from app.services.audit_service import (
     run_lease_audit,
 )
 
-router = APIRouter(tags=["Audits"])
+router = APIRouter(
+    tags=["Audits"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.post(

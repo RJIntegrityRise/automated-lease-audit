@@ -1,7 +1,7 @@
 import {
   CheckCircle2,
   CircleMinus,
-  HelpCircle,
+  AlertTriangle,
   XCircle,
 } from "lucide-react";
 
@@ -99,15 +99,16 @@ function ChecklistRow({
   item: ChecklistItemResult;
   onGoToPage: (page: number) => void;
 }) {
-  const Icon = getStatusIcon(item.status);
+  
 
   return (
     <div className="flex gap-3 px-5 py-4">
-      <Icon
-        className={`mt-0.5 h-5 w-5 shrink-0 ${getStatusClass(
-          item.status,
-        )}`}
-      />
+      {getStatusIcon(
+        item.status,
+          `mt-0.5 h-5 w-5 shrink-0 ${getStatusClass(
+            item.status,
+          )}`,
+      )}
 
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
@@ -246,16 +247,20 @@ function SummaryCard({
 
 function getStatusIcon(
   status: ChecklistStatus,
+  className: string,
 ) {
   switch (status) {
     case "present":
-      return CheckCircle2;
+      return <CheckCircle2 className={className} />;
+
     case "missing":
-      return XCircle;
+      return <XCircle className={className} />;
+
     case "review_required":
-      return HelpCircle;
+      return <AlertTriangle className={className} />;
+
     default:
-      return CircleMinus;
+      return <CircleMinus className={className} />;
   }
 }
 

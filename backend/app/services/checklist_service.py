@@ -229,8 +229,30 @@ def evaluate_checklist_item(
             )
 
 
+    if item["item_code"] == "LEASE-OCCUPANTS":
+        occupant_names = structured_data.get(
+            "occupant_names",
+            [],
+        )
 
+        if occupant_names:
+            return create_result(
+                item=item,
+                status="present",
+                detected_value=occupant_names,
+                explanation=(
+                    "Additional occupants were detected."
+                ),
+            )
 
+        return create_result(
+            item=item,
+            status="present",
+            detected_value=[],
+            explanation=(
+                "No additional occupants were detected."
+            ),
+        )
 
 
 
@@ -572,11 +594,8 @@ CHECKLIST_FIELD_MAP = {
     "LEASE-DATE": "lease_contract_date",
     "LEASE-PARTIES": "tenant_names",
     "LEASE-OCCUPANTS": "occupant_names",
-    "LEASE-TERM-START": (
-        "lease_start_date"
-    ),
-    "LEASE-TERM-END": (
-        "lease_end_date"
+    "LEASE-TERM": (
+      "lease_start_date"
     ),
     "LEASE-TERMINATION-NOTICE": (
         "notice_period_days"

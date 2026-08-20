@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -11,6 +12,11 @@ from fastapi import (
 )
 
 from app.core.config import get_settings
+from app.core.auth import (
+    CurrentUser,
+    get_current_user,
+    require_admin,
+)
 from app.core.supabase import get_supabase_client
 from app.schemas.extraction import ExtractionRunListItem, LeaseExtractionResponse
 from app.schemas.lease import (
@@ -66,6 +72,8 @@ from app.services.checklist_service import (
 router = APIRouter(
     prefix="/api/leases",
     tags=["Leases"],
+    dependencies=[Depends(get_current_user)],
+
 )
 
 
@@ -79,6 +87,7 @@ async def upload_lease(
     property_id: Annotated[str | None, Form()] = None,
     unit_number: Annotated[str | None, Form()] = None,
     internal_lease_id: Annotated[str | None, Form()] = None,
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> LeaseUploadResponse:
     """Upload a lease PDF and extract its page-level text."""
 
@@ -510,6 +519,85 @@ def get_lease_checklist(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
                 "Checklist evaluation failed: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+
+@router.delete(
+    "/{lease_id}",
+    status_code=status.HTTP_200_OK,
+)
+def delete_lease(
+    lease_id: UUID,
+    current_user: CurrentUser = Depends(require_admin),
+) -> dict[str, str]:
+    """
+    Permanently delete a lease and its stored PDF.
+
+    Only admins and master admins may delete leases.
+    """
+
+    client = get_supabase_client()
+    settings = get_settings()
+
+    lease_response = (
+        client.table("leases")
+        .select("id")
+        .eq("id", str(lease_id))
+        .limit(1)
+        .execute()
+    )
+
+    if not lease_response.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lease not found.",
+        )
+
+    document_response = (
+        client.table("lease_documents")
+        .select("storage_path")
+        .eq("lease_id", str(lease_id))
+        .execute()
+    )
+
+    storage_paths = [
+        item["storage_path"]
+        for item in (document_response.data or [])
+        if item.get("storage_path")
+    ]
+
+    try:
+        if storage_paths:
+            client.storage.from_(
+                settings.supabase_storage_bucket
+            ).remove(storage_paths)
+
+        delete_response = (
+            client.table("leases")
+            .delete()
+            .eq("id", str(lease_id))
+            .execute()
+        )
+
+        if not delete_response.data:
+            raise RuntimeError(
+                "Database deletion did not return a deleted lease."
+            )
+
+        return {
+            "message": "Lease deleted successfully.",
+            "lease_id": str(lease_id),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Unable to delete lease: "
                 f"{type(exc).__name__}: {exc}"
             ),
         ) from exc
